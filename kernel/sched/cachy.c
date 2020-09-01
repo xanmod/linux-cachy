@@ -4013,6 +4013,8 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
+
 static inline void check_schedstat_required(void)
 {
 #ifdef CONFIG_SCHEDSTATS
@@ -4091,6 +4093,17 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (!curr)
 		__enqueue_entity(cfs_rq, se);
 	se->on_rq = 1;
+	
+	/*
+	 * When bandwidth control is enabled, cfs might have been removed
+	 * because of a parent been throttled but cfs->nr_running > 1. Try to
+	 * add it unconditionnally.
+	 */
+	if (cfs_rq->nr_running == 1 || cfs_bandwidth_used())
+		list_add_leaf_cfs_rq(cfs_rq);
+
+	if (cfs_rq->nr_running == 1)
+		check_enqueue_throttle(cfs_rq);
 }
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
@@ -4138,14 +4151,40 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 'current' is not kept within the tree. */
+	if (se->on_rq) {
+		/*
+		 * Any task has to be enqueued before it get to execute on
+		 * a CPU. So account for the time it spent waiting on the
+		 * runqueue.
+		 */
+		update_stats_wait_end(cfs_rq, se);
+		//__dequeue_entity(cfs_rq, se);
+		update_load_avg(cfs_rq, se, UPDATE_TG);
+	}
+
 	update_stats_curr_start(cfs_rq, se);
 	cfs_rq->curr = se;
+
+	/*
+	 * Track our maximum slice length, if the CPU's load is at
+	 * least twice that of our own weight (i.e. dont track it
+	 * when there are only lesser-weight tasks around):
+	 */
+	if (schedstat_enabled() &&
+	    rq_of(cfs_rq)->cfs.load.weight >= 2*se->load.weight) {
+		schedstat_set(se->statistics.slice_max,
+			max((u64)schedstat_val(se->statistics.slice_max),
+			    se->sum_exec_runtime - se->prev_sum_exec_runtime));
+	}
 
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
 static int
 wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *se);
+
+static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
@@ -4156,8 +4195,15 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 	if (prev->on_rq)
 		update_curr(cfs_rq);
 
+	/* throttle cfs_rqs exceeding runtime */
+	check_cfs_rq_runtime(cfs_rq);
+
+	check_spread(cfs_rq, prev);
+
 	if (prev->on_rq) {
 		update_stats_wait_start(cfs_rq, prev);
+		/* Put 'current' back into the tree. */
+		//__enqueue_entity(cfs_rq, prev);
 		/* in !on_rq case, update occurred at dequeue */
 		update_load_avg(cfs_rq, prev, 0);
 	}
@@ -4766,6 +4812,30 @@ static void do_sched_cfs_slack_timer(struct cfs_bandwidth *cfs_b)
 	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
 }
 
+/*
+ * When a group wakes up we want to make sure that its quota is not already
+ * expired/exceeded, otherwise it may be allowed to steal additional ticks of
+ * runtime as update_curr() throttling can not not trigger until it's on-rq.
+ */
+static void check_enqueue_throttle(struct cfs_rq *cfs_rq)
+{
+	if (!cfs_bandwidth_used())
+		return;
+
+	/* an active group must be handled by the update_curr()->put() path */
+	if (!cfs_rq->runtime_enabled || cfs_rq->curr)
+		return;
+
+	/* ensure the group is not already throttled */
+	if (cfs_rq_throttled(cfs_rq))
+		return;
+
+	/* update runtime allocation */
+	account_cfs_rq_runtime(cfs_rq, 0);
+	if (cfs_rq->runtime_remaining <= 0)
+		throttle_cfs_rq(cfs_rq);
+}
+
 static void sync_throttle(struct task_group *tg, int cpu)
 {
 	struct cfs_rq *pcfs_rq, *cfs_rq;
@@ -4781,6 +4851,25 @@ static void sync_throttle(struct task_group *tg, int cpu)
 
 	cfs_rq->throttle_count = pcfs_rq->throttle_count;
 	cfs_rq->throttled_clock_task = rq_clock_task(cpu_rq(cpu));
+}
+
+/* conditionally throttle active cfs_rq's from put_prev_entity() */
+static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq)
+{
+	if (!cfs_bandwidth_used())
+		return false;
+
+	if (likely(!cfs_rq->runtime_enabled || cfs_rq->runtime_remaining > 0))
+		return false;
+
+	/*
+	 * it's possible for a throttled entity to be forced into a running
+	 * state (e.g. set_curr_task), in this case we're finished.
+	 */
+	if (cfs_rq_throttled(cfs_rq))
+		return true;
+
+	return throttle_cfs_rq(cfs_rq);
 }
 
 static enum hrtimer_restart sched_cfs_slack_timer(struct hrtimer *timer)
@@ -4957,6 +5046,8 @@ static inline bool cfs_bandwidth_used(void)
 }
 
 static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
+static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
+static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
 static inline void sync_throttle(struct task_group *tg, int cpu) {}
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
 
@@ -6178,6 +6269,8 @@ again:
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	if (!prev || prev->sched_class != &fair_sched_class)
 		goto simple;
+		
+	//printk("CONFIG_FAIR_GROUP_SCHED *********************");
 
 	/*
 	 * Because of the set_next_buddy() in dequeue_task_fair() it is rather
@@ -6213,12 +6306,23 @@ again:
 
 				if (!cfs_rq->nr_running)
 					goto idle;
-
+				
 				goto simple;
 			}
 		}
 
-		se = pick_next_entity(cfs_rq, curr);
+		//se = pick_next_entity(cfs_rq, curr);
+		se = cfs_rq->head;
+		next = se->next;
+
+		while (next)
+		{
+			if (wakeup_preempt_entity(now, se, next) == 1)
+				se = next;
+
+			next = next->next;
+		}
+
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -6253,18 +6357,26 @@ again:
 	goto done;
 simple:
 #endif
-	se = cfs_rq->head;
-	next = se->next;
+	//printk("simple *********************");
+	if (prev)
+		put_prev_task(rq, prev);
+	
+	do {
+		se = cfs_rq->head;
+		next = se->next;
+		
+		while (next)
+		{
+			if (wakeup_preempt_entity(now, se, next) == 1)
+				se = next;
 
-	while (next)
-	{
-		if (wakeup_preempt_entity(now, se, next) == 1)
-			se = next;
+			next = next->next;
+		}
 
-		next = next->next;
-	}
-
-	set_next_entity(cfs_rq, se);
+		set_next_entity(cfs_rq, se);
+		cfs_rq = group_cfs_rq(se);
+	} while (cfs_rq);
+	
 	p = task_of(se);
 
 done: __maybe_unused;

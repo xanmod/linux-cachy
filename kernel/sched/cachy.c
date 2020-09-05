@@ -6087,8 +6087,8 @@ wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *s
 	u64 vr_se 	= se->sum_exec_runtime   + 1;
 	s64 diff;
 
-	w_curr	= (now - t_curr->start_boottime);
-	w_se	= (now - t_se->start_boottime);
+	w_curr	= (now - t_curr->start_time);
+	w_se	= (now - t_se->start_time);
 
 	// adjusting for priorities
 	w_curr	*= (140 - t_curr->prio);
@@ -6096,14 +6096,14 @@ wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *s
 
 	r_curr	= w_curr / vr_curr;
 	r_se	= w_se / vr_se;
-	diff	= (s64)(r_se) - (s64)(r_curr);
+	diff	= r_se - r_curr;
 
 	// take the remainder if equal
 	if (diff == 0)
 	{
 		r_curr	= w_curr % vr_curr;
 		r_se	= w_se % vr_se;
-		diff	= (s64)(r_se) - (s64)(r_curr);
+		diff	= r_se - r_curr;
 	}
 
 	if (diff > 0)
@@ -6253,6 +6253,10 @@ again:
 	goto done;
 simple:
 #endif
+
+	if (prev)
+		put_prev_task(rq, prev);
+
 	se = cfs_rq->head;
 	next = se->next;
 

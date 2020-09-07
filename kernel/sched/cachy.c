@@ -619,6 +619,8 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		      max(delta_exec, curr->statistics.exec_max));
 
 	curr->sum_exec_runtime += delta_exec;
+	curr->hrrn_sum_exec_runtime += delta_exec;
+
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
@@ -1569,7 +1571,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	update_stats_dequeue(cfs_rq, se, flags);
 
-		__dequeue_entity(cfs_rq, se);
+	__dequeue_entity(cfs_rq, se);
+
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
 
@@ -1602,14 +1605,12 @@ wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *s
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
-	/*
-	 * If still on the runqueue then deactivate_task()
-	 * was not called and update_curr() has to be done:
-	 */
-	if (prev->on_rq)
-		update_curr(cfs_rq);
-
 	if (prev->on_rq) {
+		/*
+		 * If still on the runqueue then deactivate_task()
+		 * was not called and update_curr() has to be done:
+		 */
+		update_curr(cfs_rq);
 		update_stats_wait_start(cfs_rq, prev);
 		/* in !on_rq case, update occurred at dequeue */
 		update_load_avg(cfs_rq, prev, 0);
@@ -3532,12 +3533,12 @@ wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *s
 	u64 r_curr, r_se, w_curr, w_se;
 	struct task_struct *t_curr = task_of(curr);
 	struct task_struct *t_se = task_of(se);
-	u64 vr_curr 	= curr->sum_exec_runtime + 1;
-	u64 vr_se 	= se->sum_exec_runtime   + 1;
+	u64 vr_curr 	= curr->hrrn_sum_exec_runtime + 1;
+	u64 vr_se 	= se->hrrn_sum_exec_runtime   + 1;
 	s64 diff;
 
-	w_curr	= (now - t_curr->start_time);
-	w_se	= (now - t_se->start_time);
+	w_curr	= (now - curr->hrrn_start_time);
+	w_se	= (now - se->hrrn_start_time);
 
 	// adjusting for priorities
 	w_curr	*= (140 - t_curr->prio);
@@ -3611,6 +3612,26 @@ preempt:
 	resched_curr(rq);
 }
 
+static void reset_lifetime(u64 now, struct sched_entity *head)
+{
+	struct sched_entity *curr;
+	u64 lifetime = 10000000000ULL; // 10s
+	s64 diff;
+
+	curr = head;
+
+	while (curr) {
+		diff = (now - curr->hrrn_start_time) - lifetime;
+
+		if (diff > 0) {
+			curr->hrrn_start_time = now;
+			curr->hrrn_sum_exec_runtime = 0;
+		}
+
+		curr = curr->next;
+	}
+}
+
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
@@ -3637,6 +3658,8 @@ again:
 
 		next = next->next;
 	}
+
+	reset_lifetime(now, cfs_rq->head);
 
 	set_next_entity(cfs_rq, se);
 	p = task_of(se);
@@ -6716,6 +6739,8 @@ static void task_fork_fair(struct task_struct *p)
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
+
+	p->se.hrrn_start_time = p->start_time;
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;

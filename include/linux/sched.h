@@ -454,6 +454,8 @@ struct sched_entity {
 #ifdef CONFIG_CACHY_SCHED
 	struct sched_entity* 		next;
 	struct sched_entity* 		prev;
+	u64				hrrn_start_time;
+	u64				hrrn_sum_exec_runtime;
 #endif
 	struct list_head		group_node;
 	unsigned int			on_rq;

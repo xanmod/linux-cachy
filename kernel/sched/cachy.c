@@ -3612,10 +3612,10 @@ preempt:
 	resched_curr(rq);
 }
 
-static void reset_lifetime(u64 now, struct sched_entity *head)
+static inline void reset_lifetime(u64 now, struct sched_entity *head)
 {
 	struct sched_entity *curr;
-	u64 lifetime = 60000000000ULL; // 60s
+	u64 lifetime =  12000000ULL; // 12ms
 	s64 diff;
 
 	curr = head;
@@ -3636,7 +3636,7 @@ struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
-	struct sched_entity *se, *next, *prev_se = NULL;
+	struct sched_entity *se, *next;
 	struct task_struct *p;
 	u64 now = rq_clock_task(rq);
 	int new_tasks;
@@ -3645,23 +3645,21 @@ again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
-	if (prev) {
+	if (prev)
 		put_prev_task(rq, prev);
-		prev_se = &prev->se;
-	}
+	
+	reset_lifetime(now, cfs_rq->head);
 	
 	se = cfs_rq->head;
 	next = se->next;
 
 	while (next)
 	{
-		if (next != prev_se && wakeup_preempt_entity(now, se, next) == 1)
+		if (wakeup_preempt_entity(now, se, next) == 1)
 			se = next;
 
 		next = next->next;
 	}
-
-	reset_lifetime(now, cfs_rq->head);
 
 	set_next_entity(cfs_rq, se);
 	p = task_of(se);

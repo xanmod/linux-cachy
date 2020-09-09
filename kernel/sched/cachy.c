@@ -3530,15 +3530,20 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 static int
 wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *se)
 {
-	u64 r_curr, r_se, w_curr, w_se;
+	u64 r_curr, r_se, w_curr = 1ULL, w_se = 1ULL;
 	struct task_struct *t_curr = task_of(curr);
 	struct task_struct *t_se = task_of(se);
 	u64 vr_curr 	= curr->hrrn_sum_exec_runtime + 1;
 	u64 vr_se 	= se->hrrn_sum_exec_runtime   + 1;
 	s64 diff;
 
-	w_curr	= (now - curr->hrrn_start_time);
-	w_se	= (now - se->hrrn_start_time);
+	diff = now - curr->hrrn_start_time;
+	if (diff > 0)
+		w_curr	= diff;
+
+	diff = now - se->hrrn_start_time;
+	if (diff > 0)
+		w_se	= diff;
 
 	// adjusting for priorities
 	w_curr	*= (140 - t_curr->prio);
@@ -3612,23 +3617,16 @@ preempt:
 	resched_curr(rq);
 }
 
-static inline void reset_lifetime(u64 now, struct sched_entity *head)
+static inline void reset_lifetime(u64 now, struct sched_entity *se)
 {
-	struct sched_entity *curr;
-	u64 lifetime =  12000000ULL; // 12ms
+	u64 lifetime =  10000000000ULL; // 10s
 	s64 diff;
 
-	curr = head;
+	diff = (now - se->hrrn_start_time) - lifetime;
 
-	while (curr) {
-		diff = (now - curr->hrrn_start_time) - lifetime;
-
-		if (diff > 0) {
-			curr->hrrn_start_time = now;
-			curr->hrrn_sum_exec_runtime = 0;
-		}
-
-		curr = curr->next;
+	if (diff > 0) {
+		se->hrrn_start_time = now;
+		se->hrrn_sum_exec_runtime = 0;
 	}
 }
 
@@ -3647,14 +3645,16 @@ again:
 
 	if (prev)
 		put_prev_task(rq, prev);
-	
-	reset_lifetime(now, cfs_rq->head);
-	
+
 	se = cfs_rq->head;
 	next = se->next;
 
+	reset_lifetime(now, se);
+
 	while (next)
 	{
+		reset_lifetime(now, next);
+
 		if (wakeup_preempt_entity(now, se, next) == 1)
 			se = next;
 
@@ -6740,7 +6740,7 @@ static void task_fork_fair(struct task_struct *p)
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
-	p->se.hrrn_start_time = p->start_time;
+	p->se.hrrn_start_time = rq_clock_task(rq) + 10000000ULL; // + 10ms
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;

@@ -6740,7 +6740,7 @@ static void task_fork_fair(struct task_struct *p)
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
-	p->se.hrrn_start_time = rq_clock_task(rq) + sysctl_sched_latency;
+	p->se.hrrn_start_time = sysctl_sched_latency;
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
